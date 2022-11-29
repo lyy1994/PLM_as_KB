@@ -1,12 +1,14 @@
 # Eliciting Knowledge from Large Pre-Trained Models for Unsupervised Knowledge-Grounded Conversation
 
-This is the implementation of the paper [Eliciting Knowledge from Large Pre-Trained Models for Unsupervised Knowledge-Grounded Conversation](https://arxiv.org/abs/2211.01587).
+This is the official implementation of the paper [Eliciting Knowledge from Large Pre-Trained Models for Unsupervised Knowledge-Grounded Conversation](https://arxiv.org/abs/2211.01587).
 
 We will show the step-by-step guide for how to elicit knowledge from pre-trained models and exploit the generated knowledge in a knowledge-grounded conversation system on the [Wizard of Wikipedia](https://parl.ai/projects/wizard_of_wikipedia/) dataset. All models are trained on 16 A100 80G GPUs by default.
 
 ## 1. Knowledge Generation
 
 In this section, we will show you how to fine-tune/prefix-tune a [DialoGPT](https://arxiv.org/abs/1911.00536)/[T5](https://arxiv.org/abs/1910.10683) model such that it can learn to generate knowledge for a given dialogue history. Then we show how to generate knowledge from a tuned model using various decoding algorithms.
+
+![Fine-tuning vs. Prefix-tuning](images/tuning.svg)
 
 ### 1.1 Training
 
@@ -169,11 +171,15 @@ python scripts/eval_output.py \
     --extract-name "T5-XXL"
 ```
 
+The generated knowledge used in our paper is available [here](https://mycuhk-my.sharepoint.com/:u:/g/personal/1155165847_link_cuhk_edu_hk/EdjxsRu8thVBmcoHwPZPfIABLWRrTTW_ZoHVpd1LkvcuFA?e=sx1dop). This data set extends the raw validation and test sets of Wizard of Wikipedia with the results of a fine-tuned DialoGPT-large (stored with the name `DialoGPT-large`) and a prefix-tuned T5-XXL (stored with the name `t5-11b`).
+
 ## 2. Response Generation
 
 ### 2.1 PLATO-KAG
 
 We implement the SOTA baseline - [PLATO-KAG](https://aclanthology.org/2021.nlp4convai-1.14/) in ParlAI, which is not publicly available by the time we develop our method. We find that fine-tuning from DialoGPT performs much better than reported in their paper and [repo](https://github.com/PaddlePaddle/Knover/tree/develop/projects/PLATO-KAG).
+
+![PLATO-KAG](images/plato-kag.svg)
 
 #### 2.1.1 Training
 Below is the command to train PLATO-KAG:
@@ -294,6 +300,8 @@ There are 4 additional arguments:
 * `--posterior-sharpness`: This is the *beta* hyperparameter in our paper.
 
 We can similarly evaluate the model on the unseen valid set by adding `:topic_split` to `--task/-t` and the test set by adding `-dt test`.
+
+The PLATO-KAG+ model reported in our paper is available [here](https://mycuhk-my.sharepoint.com/:u:/g/personal/1155165847_link_cuhk_edu_hk/EQhZMJ09fWxJmaG5mPNm7lwBTQPn2xk5xgUVZYOa2G-VDA?e=hZa5K5).
 
 **NOTE**: Our model requires the generated knowledge during inference, therefore the provided dataset folder `--datapath` should contain the parsed knowledge using commands in Section 1.3. Our implemented `projects.plm_as_kb.teachers:AugmentGeneratorTeacher` provides the utility to leverage this knowledge at inference. We can access the knowledge of different models by setting `--model-response-names`, which is `--store-name` in Section 1.3. We can use knowledge from multiple models by separating their names by commas.
 
