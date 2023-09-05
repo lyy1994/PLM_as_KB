@@ -432,6 +432,7 @@ class TorchGeneratorAgent(TorchAgent, ABC):
                 'nucleus',
                 'delayedbeam',
                 'delayednucleusbeam',
+                'factual_nucleus',
             },
             default='greedy',
             help='Generation algorithm',
@@ -444,6 +445,24 @@ class TorchGeneratorAgent(TorchAgent, ABC):
         )
         agent.add_argument(
             '--beam-delay', type=int, default=30, help='used in delayedbeam search'
+        )
+        agent.add_argument(
+            '--lambda-decay',
+            type=float,
+            default=0.9,
+            help='decay factor in factual nucleus sampling',
+        )
+        agent.add_argument(
+            '--omega-bound',
+            type=float,
+            default=0.3,
+            help='lower bound in factual nucleus sampling',
+        )
+        agent.add_argument(
+            '--p-reset',
+            type='bool',
+            default=True,
+            help='Whether to reset p value in factual nucleus at full stops',
         )
         agent.add_argument(
             '--beam-block-list-filename',
@@ -468,6 +487,12 @@ class TorchGeneratorAgent(TorchAgent, ABC):
             type='bool',
             help='Set to use CUDA kernel for beam search ngram blocking',
             default=False,
+        )
+        parser.add_argument(
+            '--verbose-topk',
+            type=int,
+            help='Return the topk logits in the act message, if verbose mode is set.',
+            default=-1,
         )
 
         super().add_cmdline_args(parser, partial_opt=partial_opt)
@@ -497,8 +522,10 @@ class TorchGeneratorAgent(TorchAgent, ABC):
         else:
             # this is not a shared instance of this class, so do full init
             self.criterion = self.build_criterion()
+
+            self.model = self.build_model()
             with fsdp_utils.maybe_fsdp_wrap(opt):
-                self.model = fsdp_utils.fsdp_wrap(self.build_model())
+                self.model = fsdp_utils.fsdp_wrap(self.model)
                 if self.fp16 and not fsdp_utils.delay_halving(opt):
                     self.model = self.model.half()
 
@@ -696,6 +723,12 @@ class TorchGeneratorAgent(TorchAgent, ABC):
         """
         return self._model_input(batch)
 
+    def record_per_token_metrics(self, batch, loss_per_token):
+        """
+        Override this method for custom loss values that require loss_per_token.
+        """
+        pass
+
     def compute_loss(self, batch, return_output=False):
         """
         Compute and return the loss for the given batch.
@@ -710,28 +743,33 @@ class TorchGeneratorAgent(TorchAgent, ABC):
         model_output = self.model(*self._model_input(batch), ys=batch.label_vec)
         scores, preds, *_ = model_output
         score_view = scores.reshape(-1, scores.size(-1))
-        loss = self.criterion(score_view, batch.label_vec.view(-1))
-        loss = loss.view(scores.shape[:-1]).sum(dim=1)
-        # save loss to metrics
+        loss_flattened = self.criterion(score_view, batch.label_vec.view(-1))
+        loss_per_token = loss_flattened.view(scores.shape[:-1])
         notnull = batch.label_vec.ne(self.NULL_IDX)
-        target_tokens = notnull.long().sum(dim=-1)
-        correct = ((batch.label_vec == preds) * notnull).sum(dim=-1)
 
+        # save loss to metrics
         # cross entropy loss
-        self.record_local_metric('loss', AverageMetric.many(loss, target_tokens))
+        self.record_local_metric(
+            'loss', AverageMetric.from_mask(loss_per_token, notnull)
+        )
         # perplexity
-        self.record_local_metric('ppl', PPLMetric.many(loss, target_tokens))
+        self.record_local_metric('ppl', PPLMetric.from_mask(loss_per_token, notnull))
         # token-wise accuracy
         self.record_local_metric(
-            'token_acc', AverageMetric.many(correct, target_tokens)
+            'token_acc', AverageMetric.from_mask(batch.label_vec == preds, notnull)
         )
         # utterance-wise exact match
+        num_target_tokens = notnull.long().sum(dim=-1)
+        num_tokens_correct = ((batch.label_vec == preds) * notnull).sum(dim=-1)
         self.record_local_metric(
-            'token_em', AverageMetric.many(correct == target_tokens)
+            'token_em', AverageMetric.many(num_tokens_correct == num_target_tokens)
         )
+        self.record_per_token_metrics(batch, loss_per_token)
+
         # actually do backwards loss
+        loss = loss_per_token.sum(dim=1)
         loss = loss.sum()
-        loss /= target_tokens.sum()  # average loss per token
+        loss /= num_target_tokens.sum()  # average loss per token
         if return_output:
             return (loss, model_output)
         else:
@@ -881,6 +919,8 @@ class TorchGeneratorAgent(TorchAgent, ABC):
         self.model.eval()
         cand_scores = None
         token_losses = None
+        logits = None
+        logit_inds = None
         text_token_info = None
 
         if batch.label_vec is not None:
@@ -890,6 +930,16 @@ class TorchGeneratorAgent(TorchAgent, ABC):
                 token_losses = self._construct_label_token_losses(
                     batch.label_vec, model_output
                 )
+                logits = model_output[0]
+                k = self.opt['verbose_topk']
+                if k != -1:
+                    tk = torch.topk(logits, k, dim=2)
+                    logits = tk.values
+                    logit_inds = tk.indices
+                    if isinstance(logit_inds, torch.Tensor):
+                        logit_inds = logit_inds.cpu().numpy().tolist()
+                if isinstance(logits, torch.Tensor):
+                    logits = logits.cpu().numpy().tolist()
 
         beam_preds_scores = None
         preds = None
@@ -945,7 +995,12 @@ class TorchGeneratorAgent(TorchAgent, ABC):
             # compute additional bleu scores
             self._compute_fairseq_bleu(batch, preds)
         retval = Output(
-            text, cand_choices, token_losses=token_losses, cand_scores=cand_scores
+            text,
+            cand_choices,
+            token_losses=token_losses,
+            cand_scores=cand_scores,
+            logits=logits,
+            logit_inds=logit_inds,
         )
 
         if not self.skip_generation:
@@ -1046,6 +1101,25 @@ class TorchGeneratorAgent(TorchAgent, ABC):
                 device=device,
                 verbose=verbose,
                 gpu_beam_blocking=self.opt.get('gpu_beam_blocking', False),
+            )
+        elif method == 'factual_nucleus':
+            return FactualNucleusSampling(
+                self.opt['topp'],
+                self.opt['lambda_decay'],
+                self.opt['omega_bound'],
+                self.opt['p_reset'],
+                beam_size,
+                min_length=self.beam_min_length,
+                block_ngram=self.beam_block_ngram,
+                context_block_ngram=self.beam_context_block_ngram,
+                length_penalty=self.opt.get('beam_length_penalty', 0.65),
+                padding_token=self.NULL_IDX,
+                bos_token=self.START_IDX,
+                eos_token=self.END_IDX,
+                device=device,
+                verbose=verbose,
+                gpu_beam_blocking=self.opt.get('gpu_beam_blocking', False),
+                dict=self.dict,
             )
         else:
             raise ValueError(f"Can't use inference method {method}")
@@ -1337,6 +1411,7 @@ class TreeSearch(object):
         length_penalty=0.65,
         verbose=False,
         gpu_beam_blocking=False,
+        dict=None,
     ):
         """
         Instantiate Beam object.
@@ -1357,6 +1432,8 @@ class TreeSearch(object):
             minimum length of the predicted sequence
         :param device:
             What device to use for computations
+        :param dict:
+            dictionary, if necessary
         """
         self.beam_size = beam_size
         self.length_penalty = length_penalty
@@ -1393,11 +1470,10 @@ class TreeSearch(object):
         self.eos_top = False
         self.eos_top_ts = None
         self.n_best_counter = 0
-        self.gpu_beam_blocking = gpu_beam_blocking
+        self.gpu_beam_blocking = gpu_beam_blocking and torch.cuda.is_available()
         self.partial_hyps = torch.tensor([[self.bos] for i in range(beam_size)])
         if self.gpu_beam_blocking:
             self.partial_hyps = self.partial_hyps.cuda()
-        if torch.cuda.is_available():
             self.no_repeat_ngram_op = NGramRepeatBlock()
 
     def set_context(self: TSType, context: torch.LongTensor) -> TSType:
@@ -1440,7 +1516,7 @@ class TreeSearch(object):
 
     def get_output_from_current_step(self):
         """
-        Get the outputput at the current step.
+        Get the output at the current step.
         """
         return self.outputs[-1]
 
@@ -1596,7 +1672,7 @@ class TreeSearch(object):
             hyp_device = self.partial_hyps.get_device()
         self.partial_hyps = torch.cat(
             (
-                self.partial_hyps[path_selection.hypothesis_ids.long()],
+                self.partial_hyps[path_selection.hypothesis_ids.long().to(hyp_device)],
                 path_selection.token_ids.view(path_selection.token_ids.shape[0], -1).to(
                     hyp_device
                 ),
@@ -1954,6 +2030,21 @@ class NucleusSampling(TreeSearch):
         super().__init__(*args, **kwargs)
         self.p = p
 
+    def update_p(self, tokens: torch.Tensor):
+        pass
+
+    def get_mask(self, sorted_probs: torch.Tensor) -> torch.Tensor:
+        """
+        Get probability mask.
+
+        :param sorted_probs:
+            sorted probabilities
+
+        :return mask:
+            mask out tokens below the p value when sampling.
+        """
+        return (sorted_probs.cumsum(dim=-1) - sorted_probs) >= self.p
+
     def select_paths(self, logprobs, prior_scores, current_length) -> _PathSelection:
         # Unlike the other treesearch methods, we have to switch to linspace
         # for the probabilities in order to compute the CDF.
@@ -1961,13 +2052,14 @@ class NucleusSampling(TreeSearch):
         sprobs, sinds = probs.sort(dim=-1, descending=True)
         # The subtraction here is to get the exclusive prefix sum,
         # to guarantee the first element is not masked
-        mask = (sprobs.cumsum(dim=-1) - sprobs) >= self.p
+        mask = self.get_mask(sprobs)
         trunc_sprobs = sprobs.detach().clone()
         trunc_sprobs[mask] = 0
         trunc_sprobs.div_(trunc_sprobs.sum(dim=-1).unsqueeze(1))
         choices = torch.multinomial(trunc_sprobs, 1)[:, 0]
         hyp_ids = torch.arange(logprobs.size(0)).to(logprobs.device)
         tok_ids = sinds[hyp_ids, choices]
+        self.update_p(tok_ids)
         # Convert back to logspace.
         scores = trunc_sprobs[hyp_ids, choices].log()
         best_scores = prior_scores.expand_as(scores) + scores
@@ -1989,3 +2081,53 @@ class NucleusSampling(TreeSearch):
             scores=best_scores,
             token_details=token_details,
         )
+
+
+class FactualNucleusSampling(NucleusSampling):
+    """
+    Factual Nucleus Sampling.
+
+    See https://arxiv.org/pdf/2206.04624.pdf for more information
+    """
+
+    def __init__(
+        self, p, lambda_decay, omega_bound, p_reset, beam_size, *args, **kwargs
+    ):
+        super().__init__(p, beam_size, *args, **kwargs)
+        assert 'dict' in kwargs
+        buffer = torch.zeros(beam_size)
+        self.p = buffer.clone().fill_(p).unsqueeze(1)
+        self.init_p = self.p.clone()
+        self.lambda_decay = lambda_decay
+        self.omega_bound = torch.tensor(omega_bound)
+        self.toks_since_reset = buffer.clone()
+        self.full_stop_list = torch.tensor(
+            [kwargs['dict'].txt2vec(w) for w in ['.', '?', '!']]
+        )
+        self.p_reset = p_reset
+
+    def update_p(self, tokens: torch.Tensor):
+        """
+        Updates sampling P value according to tokens generated.
+
+        When tokens are *not* punctuation, p is decayed by lambda_decay factor.
+
+        Otherwise, we reset the p value.
+
+        :param tokens:
+            sampled tokens.
+        """
+        for i, t in enumerate(tokens):
+            if self.full_stop_list.to(tokens.device).eq(t).sum() > 0:
+                self.toks_since_reset[i] = 0
+            else:
+                self.toks_since_reset[i] += 1
+            decay_factor = max(0, self.toks_since_reset[i] - 1)
+            self.p[i] = torch.max(
+                self.omega_bound, self.init_p[i] * (self.lambda_decay ** (decay_factor))
+            )
+
+    def get_mask(self, sorted_probs: torch.Tensor) -> torch.Tensor:
+        return (sorted_probs.cumsum(dim=-1) - sorted_probs) >= self.p.expand(
+            sorted_probs.size()
+        ).to(sorted_probs.device)

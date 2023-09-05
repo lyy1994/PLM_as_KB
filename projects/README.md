@@ -6,6 +6,10 @@ This directory also contains subfolders for some of the projects which are house
 
 ## BlenderBot (Putting Everything Together)
 
+
+- **BlenderBot 3x** [[project]](http://parl.ai/projects/bb3x).
+  _Data release of 6M chat interactions, training on this improves BB3 from 85.3% → 94.4% good messages._
+
 - **BlenderBot 3** [[project]](http://parl.ai/projects/bb3).
   _A 175B-parameter, publicly available chatbot that improves its skills & safety over time_
 
@@ -18,7 +22,9 @@ This directory also contains subfolders for some of the projects which are house
 
 ## Generative Models & Architectures 
 
-- **Director** [[project]](https://parl.ai/projects/director/) _New architecture/method for training language models with positive and negative examples._
+- **CRINGE Loss** [[project]](https://parl.ai/projects/cringe/) _New loss for training language models with negative examples (with no architecture change)._
+
+- **Director** [[project]](https://parl.ai/projects/director/) _New architecture for training language models with positive and negative examples using LM+classifier heads._
 
 - **Maintaining Identity** [[project]](https://github.com/facebookresearch/ParlAI/tree/main/projects/light_whoami/) _State-of-the-art dialogue models cannot maintain identity -- we study measurements & methods for this open problem._
 
@@ -137,7 +143,7 @@ _Task & models for chitchat with a given persona._
 
 ## Environment Grounded
 
-- **LIGHT** [[project]](http://parl.ai/projects/light/)
+- **LIGHT** [[project]](https://parl.ai/projects/light/)
 _A large-scale text adventure game research platform for agents that speak and act._
 
 - **Mastering the Dungeon** (Archived) [[project]](https://github.com/facebookresearch/ParlAI/tree/main/projects/mastering_the_dungeon).
@@ -145,6 +151,9 @@ _Task & models for training grounded agents in a text adventure game via MTurk._
 
 - **Talk The Walk** (Archived) [[paper]](https://arxiv.org/abs/1807.03367).
 _Task & models for grounded dialogue for the task of navigating New York City streets._
+
+- **Multi-party LIGHT** [[paper]](https://arxiv.org/abs/2304.13835).
+_Task & models for multi-party chat in LIGHT. Conversation is grounded on charaters' persona and the location._
 
 ## QA
 

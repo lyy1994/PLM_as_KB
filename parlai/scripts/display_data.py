@@ -59,7 +59,10 @@ def simple_display(opt, world, turn):
     text = act.get('text', '[no text field]')
     print(colorize(text.encode('utf-16', 'surrogatepass').decode('utf-16'), 'text'))
     labels = act.get('labels', act.get('eval_labels', ['[no labels field]']))
-    labels = '|'.join(labels)
+    if len(labels) == 1 and labels[0] is None:
+        labels = str(labels)
+    else:
+        labels = '|'.join(labels)
     print('   ' + colorize(labels, 'labels'))
 
 
@@ -82,7 +85,10 @@ def display_data(opt):
         # NOTE: If you want to look at the data from here rather than calling
         # world.display() you could access world.acts[0] directly, see simple_display above.
         if opt.get('verbose', False) or opt.get('display_add_fields', ''):
-            print(world.display() + '\n~~')
+            print(
+                world.display().encode('utf-16', 'surrogatepass').decode('utf-16')
+                + '\n~~'
+            )
         else:
             simple_display(opt, world, turn)
             turn += 1
